@@ -96,21 +96,48 @@
     if (/^(\d)\1+$/.test(pureDigits)) return '';
 
     // Saudi Arabia phone canonicalization:
-    // Saudi mobile 05XXXXXXXX (10 digits) -> +9665XXXXXXXX
-    if (pureDigits.length === 10 && pureDigits.startsWith('05')) {
+    // Saudi numbers use +966 country code.
+    // Mobile prefixes: 05X (e.g. 050, 053, 054, 055, 056, 057, 058, 059)
+    // Landline prefixes by region:
+    //   011 = Riyadh, 012 = Jeddah, 013 = Eastern Province,
+    //   014 = Qassim,  016 = Medina,  017 = Taif,
+    //   03  = other regions (7-digit after 03 = 9 total)
+    // International format already supplied with +966:
+    //   +966 5X XXXXXXX  (mobile, 12 digits: 9665XXXXXXXX)
+    //   +966 1X XXXXXXX  (landline, 12 digits: 9661XXXXXXXX)
+
+    // ── 10-digit numbers starting with 0 (local Saudi format) ────────────────
+    if (pureDigits.length === 10 && pureDigits.startsWith('0')) {
+      // Mobile: 05X
+      if (pureDigits.startsWith('05')) {
+        return `+966${pureDigits.slice(1)}`;
+      }
+      // Landline: 011–019 (Riyadh, Jeddah, Eastern, Qassim, Medina, Taif, etc.)
+      if (/^01[1-9]/.test(pureDigits)) {
+        return `+966${pureDigits.slice(1)}`;
+      }
+      // Landline: 02X (Western region)
+      if (pureDigits.startsWith('02')) {
+        return `+966${pureDigits.slice(1)}`;
+      }
+      // Landline: 03X–07X (other regions)
+      if (/^0[3-7]/.test(pureDigits)) {
+        return `+966${pureDigits.slice(1)}`;
+      }
+      // Generic Saudi 0X fallback
       return `+966${pureDigits.slice(1)}`;
     }
-    // Saudi mobile 9665XXXXXXXX (12 digits) -> +9665XXXXXXXX
-    if (pureDigits.length === 12 && pureDigits.startsWith('9665')) {
+
+    // ── 12-digit numbers already carrying 966 prefix (no leading +) ──────────
+    if (pureDigits.length === 12 && pureDigits.startsWith('966')) {
       return `+${pureDigits}`;
     }
-    // Saudi landline 01XXXXXXXX (10 digits) -> +9661XXXXXXXX
-    if (pureDigits.length === 10 && pureDigits.startsWith('01')) {
-      return `+966${pureDigits.slice(1)}`;
-    }
-    // Saudi landline 9661XXXXXXXX (12 digits) -> +9661XXXXXXXX
-    if (pureDigits.length === 12 && pureDigits.startsWith('9661')) {
-      return `+${pureDigits}`;
+
+    // ── 9-digit numbers without leading 0 (stripped-prefix Saudi) ────────────
+    // e.g. 551234567 (mobile without 0) or 112345678 (landline without 0)
+    if (pureDigits.length === 9) {
+      if (/^5/.test(pureDigits)) return `+9665${pureDigits.slice(1)}`;
+      if (/^[1-4]/.test(pureDigits)) return `+966${pureDigits}`;
     }
 
     return digitsWithPlus.startsWith('+') ? `+${pureDigits}` : pureDigits;
@@ -136,14 +163,20 @@
 
     const digits = norm.replace(/\D/g, '');
 
-    // Format Saudi mobile nicely: +966 5X XXX XXXX
+    // Format Saudi mobile: +966 5X XXX XXXX  (12 digits starting with 9665)
     if (digits.length === 12 && digits.startsWith('9665')) {
       return `+966 ${digits.slice(3, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
     }
 
-    // Format Saudi landline nicely: +966 1X XXX XXXX
-    if (digits.length === 12 && digits.startsWith('9661')) {
-      return `+966 ${digits.slice(3, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
+    // Format Saudi landline: +966 1X XXX XXXX or +966 2 XXX XXXX etc.
+    // Covers 9661X (Riyadh 011), 9662X (Jeddah 012), 9663X–9669X
+    if (digits.length === 12 && digits.startsWith('966')) {
+      const areaStart = digits.slice(3, 5); // e.g. "11", "12", "13"
+      const rest      = digits.slice(5);    // remaining 7 digits
+      if (rest.length === 7) {
+        return `+966 ${areaStart} ${rest.slice(0, 3)} ${rest.slice(3)}`;
+      }
+      return `+966 ${digits.slice(3, 5)} ${digits.slice(5)}`;
     }
 
     // Preserve clean existing human spacing if present (e.g. "+971 4 123 4567")

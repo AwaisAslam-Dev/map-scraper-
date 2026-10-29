@@ -573,64 +573,121 @@
   }
 
   // ── Detail Panel Synchronization ───────────────────────────────────────────
-  async function waitForPanelUpdate(expectedName, expectedPlaceId, previousPanelName, timeout = 3500) {
+
+  /**
+   * Returns the narrowest DOM element that represents the currently-open
+   * business detail pane — NOT the search results sidebar.
+   *
+   * Google Maps DOM structure (search results page with detail panel open):
+   *
+   *   div[role="main"]                    ← ENTIRE left sidebar — WRONG target
+   *   └─ div.m6QErb                       ← inner scroll container
+   *      └─ div.m6QErb.DFlfde            ← detail pane wrapper (appears when panel opens)
+   *         └─ div.TIHn2                  ← business title + action buttons area
+   *         └─ div.rogA2c                 ← each info row (phone, address, hours, website)
+   *
+   * We check for div.TIHn2 presence because it only exists when a real business
+   * detail panel is open — it is never present in the plain search-results state.
+   */
+  function getDetailPane() {
+    // 1. div.TIHn2 is the title/header section — only exists in an open detail panel
+    const titleSection = document.querySelector('div.TIHn2');
+    if (titleSection) {
+      // Walk up to get the containing pane (div.m6QErb.DFlfde or similar)
+      const pane = titleSection.closest('div.m6QErb') ||
+                   titleSection.closest('div[role="main"]') ||
+                   titleSection.parentElement;
+      if (pane) return pane;
+    }
+
+    // 2. div.m6QErb.DFlfde — the detail pane wrapper class Google uses
+    const dflfde = document.querySelector('div.m6QErb.DFlfde');
+    if (dflfde) return dflfde;
+
+    // 3. Any container that has both h1.DUwDvf (business title) AND
+    //    a phone/address/website button — proving it's a real detail panel
+    const h1 = document.querySelector('h1.DUwDvf, h1.fontHeadlineLarge');
+    if (h1) {
+      const pane = h1.closest('div.m6QErb') ||
+                   h1.closest('div.widget-pane-content') ||
+                   h1.parentElement?.parentElement;
+      if (pane && (
+        pane.querySelector('[data-item-id*="phone"]') ||
+        pane.querySelector('[data-item-id="address"]') ||
+        pane.querySelector('[data-item-id="authority"]') ||
+        pane.querySelector('a[href^="tel:"]')
+      )) return pane;
+    }
+
+    // 4. Last resort: widget-pane-content
+    const widget = document.querySelector('div.widget-pane-content');
+    if (widget) return widget;
+
+    return null;
+  }
+
+  async function waitForPanelUpdate(expectedName, expectedPlaceId, previousPanelName, timeout = 5000) {
     const startTime = Date.now();
     const cleanExpected = (expectedName || '').trim();
 
     while (Date.now() - startTime < timeout) {
-      if (!isRunning) return { updated: false, panel: null };
+      if (!isRunning) return { updated: false, pane: null };
 
-      const currentUrl = window.location.href;
-      const isPlaceUrl = currentUrl.includes('/maps/place/') || currentUrl.includes('/place/');
+      const pane = getDetailPane();
+      if (pane) {
+        // Get name ONLY from the narrow detail pane — not the full sidebar
+        const currentName = extractPanelName(pane);
 
-      const panel = document.querySelector('div[role="main"]') ||
-                    document.querySelector('div.m6QErb.DFlfde') ||
-                    document.querySelector('div.widget-pane-content');
+        if (currentName && !isGenericHeader(currentName)) {
+          const isStillPrevious = previousPanelName && isCloseBusinessName(previousPanelName, currentName);
 
-      if (panel) {
-        const currentName = extractPanelName(panel);
+          if (!isStillPrevious) {
+            // 1. Direct Place ID match in current URL
+            const currentUrl = window.location.href;
+            if (expectedPlaceId && currentUrl.toLowerCase().includes(expectedPlaceId.toLowerCase())) {
+              await wait(250);
+              return { updated: true, pane };
+            }
 
-        // Ensure we are not looking at the stale previous business panel
-        const isStillPrevious = previousPanelName && isCloseBusinessName(previousPanelName, currentName);
+            // 2. Close name match
+            if (cleanExpected && isCloseBusinessName(cleanExpected, currentName)) {
+              await wait(250);
+              return { updated: true, pane };
+            }
 
-        if (!isStillPrevious && currentName && !isGenericHeader(currentName)) {
-          // 1. Direct Place ID match in current URL
-          if (expectedPlaceId && isPlaceUrl && currentUrl.toLowerCase().includes(expectedPlaceId.toLowerCase())) {
-            await wait(200);
-            return { updated: true, panel };
-          }
+            // 3. Substring match (first 12 chars)
+            const expLow  = cleanExpected.toLowerCase();
+            const currLow = currentName.toLowerCase();
+            if (expLow.length >= 4 && currLow.length >= 4 &&
+                (currLow.includes(expLow.slice(0, 12)) || expLow.includes(currLow.slice(0, 12)))) {
+              await wait(250);
+              return { updated: true, pane };
+            }
 
-          // 2. Direct or close name match
-          if (cleanExpected && isCloseBusinessName(cleanExpected, currentName)) {
-            await wait(200);
-            return { updated: true, panel };
-          }
-
-          // 3. Substring match
-          const cleanExpLow = cleanExpected.toLowerCase();
-          const cleanCurrLow = currentName.toLowerCase();
-          if (cleanCurrLow.includes(cleanExpLow.slice(0, 10)) || cleanExpLow.includes(cleanCurrLow.slice(0, 10))) {
-            await wait(200);
-            return { updated: true, panel };
+            // 4. Pane changed to a different business than before (any new name = progress)
+            if (!cleanExpected) {
+              return { updated: true, pane };
+            }
           }
         }
       }
 
-      await wait(120);
+      await wait(150);
     }
 
-    // Fallback: check one last time if panel is present with actions
-    const finalPanel = document.querySelector('div[role="main"]') || document.querySelector('div.m6QErb.DFlfde');
-    if (finalPanel) {
-      const currentName = extractPanelName(finalPanel);
+    // Final attempt — accept any non-previous detail pane that has loaded
+    const finalPane = getDetailPane();
+    if (finalPane) {
+      const currentName = extractPanelName(finalPane);
       if (currentName && !isGenericHeader(currentName)) {
         if (!previousPanelName || !isCloseBusinessName(previousPanelName, currentName)) {
-          return { updated: true, panel: finalPanel };
+          log(`[PANEL] Timeout fallback accepted pane with name: "${currentName}"`);
+          return { updated: true, pane: finalPane };
         }
       }
     }
 
-    return { updated: false, panel: null };
+    return { updated: false, pane: null };
   }
 
   // ── Enrich via Detail Panel ────────────────────────────────────────────────
@@ -646,78 +703,87 @@
     // 2. Trigger open
     triggerInPagePanelOpen(card);
 
-    // 3. Wait for panel name to update (confirms correct business loaded)
-    let panelResult = await waitForPanelUpdate(item.name, placeId, lastPanelName, 3500);
+    // 3. Wait for the narrow detail pane to show the correct business
+    let panelResult = await waitForPanelUpdate(item.name, placeId, lastPanelName, 5000);
 
     // Retry once if first attempt did not open
-    if ((!panelResult.updated || !panelResult.panel) && isRunning) {
+    if ((!panelResult.updated || !panelResult.pane) && isRunning) {
+      log(`[ENRICH] Retrying panel open for "${item.name}"...`);
       triggerInPagePanelOpen(card);
-      panelResult = await waitForPanelUpdate(item.name, placeId, lastPanelName, 2500);
+      panelResult = await waitForPanelUpdate(item.name, placeId, lastPanelName, 3500);
     }
 
-    if (panelResult.updated && panelResult.panel) {
-      const panel = panelResult.panel;
+    if (panelResult.updated && panelResult.pane) {
+      // pane = the NARROW detail pane element, NOT div[role="main"]
+      const pane = panelResult.pane;
 
-      // 4. Wait for phone button to appear in panel DOM — Google Maps loads it async
-      //    after the name/title renders. Poll up to 4 seconds.
+      // 4. Wait for phone button to appear inside the narrow pane
       if (!item.phone) {
-        await waitForPanelPhone(panel, 4000);
+        await waitForPanelPhone(pane, 4500);
       }
 
-      // 5. Wait for website link to appear in panel DOM — also async loaded
+      // 5. Wait for website link to appear inside the narrow pane
       if (!item.website) {
-        await waitForPanelWebsite(panel, 3000);
+        await waitForPanelWebsite(pane, 3500);
       }
 
-      // 6. Now extract everything from the fully loaded panel
-      enrichFromDetailPanel(item, panel, profileUrl);
+      // 6. Extract everything — scoped to the narrow pane only
+      enrichFromDetailPanel(item, pane, profileUrl);
       lastPanelName = item.name;
-      log(`[ENRICH] Successfully enriched "${item.name}" -> Phone: ${item.phone || 'none'}, Website: ${item.website || 'none'}`);
+      log(`[ENRICH] Enriched "${item.name}" -> Phone: ${item.phone || 'none'}, Website: ${item.website || 'none'}, Social: ${item.socialLinks?.length || 0}`);
     } else {
-      logWarning(`[ENRICH] Detail panel timed out for "${item.name}". Preserving card-level data.`);
+      logWarning(`[ENRICH] Detail pane timed out for "${item.name}". Preserving card-level data.`);
     }
 
     // 7. Ensure the search feed is visible before moving to next item
     await returnToFeedIfHidden();
   }
 
-  // ── Poll panel until phone button appears ─────────────────────────────────
-  async function waitForPanelPhone(panel, timeout = 4000) {
+  // ── Poll narrow pane until phone button appears ───────────────────────────
+  async function waitForPanelPhone(pane, timeout = 4500) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       if (!isRunning) return;
-      // Check for any phone-related element appearing in panel
       const hasPhone = (
-        panel.querySelector('button[data-item-id^="phone:"]') ||
-        panel.querySelector('[data-item-id*="phone"]') ||
-        panel.querySelector('a[href^="tel:"]') ||
-        panel.querySelector('button[aria-label*="phone" i]') ||
-        panel.querySelector('button[aria-label*="call" i]') ||
-        panel.querySelector('button[aria-label*="هاتف" i]') ||
-        panel.querySelector('button[aria-label*="اتصال" i]')
+        pane.querySelector('[data-item-id^="phone:tel:"]') ||
+        pane.querySelector('[data-item-id^="phone:"]')     ||
+        pane.querySelector('[data-item-id*="phone"]')      ||
+        pane.querySelector('a[href^="tel:"]')              ||
+        pane.querySelector('button[aria-label*="phone" i]') ||
+        pane.querySelector('button[aria-label*="call" i]') ||
+        pane.querySelector('button[aria-label*="هاتف" i]') ||
+        pane.querySelector('button[aria-label*="اتصال" i]')
       );
-      if (hasPhone) return;
+      if (hasPhone) {
+        log(`[PANEL] Phone element found in pane after ${Date.now() - start}ms`);
+        return;
+      }
       await wait(200);
     }
+    log(`[PANEL] Phone element not found in pane after ${timeout}ms — continuing anyway`);
   }
 
-  // ── Poll panel until website link appears ─────────────────────────────────
-  async function waitForPanelWebsite(panel, timeout = 3000) {
+  // ── Poll narrow pane until website link appears ───────────────────────────
+  async function waitForPanelWebsite(pane, timeout = 3500) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       if (!isRunning) return;
       const hasWebsite = (
-        panel.querySelector('a[data-item-id="authority"]') ||
-        panel.querySelector('a[data-value="Website"]') ||
-        panel.querySelector('a[aria-label*="website" i]') ||
-        panel.querySelector('a[data-tooltip*="website" i]') ||
-        // Google redirect format
-        panel.querySelector('a[href*="google.com/url?q="]') ||
-        panel.querySelector('a[href*="/url?q="]')
+        pane.querySelector('a[data-item-id="authority"]')   ||
+        pane.querySelector('[data-item-id="authority"]')    ||
+        pane.querySelector('a[data-value="Website"]')       ||
+        pane.querySelector('a[aria-label*="website" i]')   ||
+        pane.querySelector('a[data-tooltip*="website" i]') ||
+        pane.querySelector('a[href*="/url?q="]')           ||
+        pane.querySelector('a[href*="google.com/url"]')
       );
-      if (hasWebsite) return;
+      if (hasWebsite) {
+        log(`[PANEL] Website element found in pane after ${Date.now() - start}ms`);
+        return;
+      }
       await wait(200);
     }
+    log(`[PANEL] Website element not found in pane after ${timeout}ms — continuing anyway`);
   }
 
   // ── Feed Visibility and Return Helper ──────────────────────────────────────
@@ -792,86 +858,111 @@
     return null;
   }
 
-  // ── Enrich item from verified detail panel ──────────────────────────────────
-  function enrichFromDetailPanel(item, panel, profileUrl) {
-    if (!item || !panel) return;
+  // ── Enrich item from verified detail pane ──────────────────────────────────
+  // IMPORTANT: `pane` must be the NARROW detail pane element returned by
+  // getDetailPane() — NOT div[role="main"] which is the entire sidebar.
+  function enrichFromDetailPanel(item, pane, profileUrl) {
+    if (!item || !pane) return;
 
-    // 1. Authoritative untruncated name: upgrade if panel title provides fuller version
-    const panelName = extractPanelName(panel);
+    // 1. Authoritative untruncated name from the narrow pane title
+    const panelName = extractPanelName(pane);
     if (panelName && !isGenericHeader(panelName)) {
       if (!item.name || item.name.includes('...') || item.name.includes('…') || panelName.length > item.name.length) {
         item.name = panelName;
         item.businessName = panelName;
+        log(`[ENRICH] Name upgraded: "${item.name}"`);
       }
     }
 
-    // 2. Phone extraction from panel (strictly validated)
+    // 2. Phone — scoped to narrow pane only
     if (!item.phone) {
-      const phObj = extractPhoneNumber(panel);
+      const phObj = extractPhoneNumber(pane);
       if (phObj && phObj.phone) {
-        item.phone = phObj.phone;
+        item.phone    = phObj.phone;
         item.rawPhone = phObj.rawPhone;
+        log(`[ENRICH] Phone found: ${item.phone}`);
+      } else {
+        log(`[ENRICH] No phone found in pane for "${item.name}"`);
       }
     }
 
-    // 3. Official website extraction from panel
+    // 3. Website — scoped to narrow pane only
     if (!item.website) {
-      const web = extractBusinessWebsite(panel);
+      const web = extractBusinessWebsite(pane);
       if (web) {
         item.website = web;
-        item.link = web;
+        item.link    = web;
+        log(`[ENRICH] Website found: ${item.website}`);
+      } else {
+        log(`[ENRICH] No website found in pane for "${item.name}"`);
       }
     }
 
-    // 4. Social links from panel
-    const soc = extractBusinessSocialLinks(panel);
+    // 4. Social links — scoped to narrow pane only
+    const soc = extractBusinessSocialLinks(pane);
     if (soc && soc.length > 0) {
-      const existing = item.socialLinks || [];
+      const existing = Array.isArray(item.socialLinks) ? item.socialLinks : [];
       item.socialLinks = Array.from(new Set([...existing, ...soc]));
+      log(`[ENRICH] Social links found: ${item.socialLinks.join(' | ')}`);
     }
 
-    // 5. Address from panel if missing
+    // 5. Address — scoped to narrow pane only
     if (!item.address) {
-      const addrBtn = panel.querySelector('button[data-item-id="address"], button[aria-label*="Address" i], button[aria-label*="العنوان" i], [data-item-id="address"]');
-      if (addrBtn) {
-        const ioText = addrBtn.querySelector('.Io6YTe')?.textContent?.trim();
-        const aria = addrBtn.getAttribute('aria-label') || '';
+      const addrEl = pane.querySelector(
+        'button[data-item-id="address"], [data-item-id="address"],' +
+        'button[aria-label*="Address" i], button[aria-label*="العنوان" i]'
+      );
+      if (addrEl) {
+        const ioText  = addrEl.querySelector('.Io6YTe')?.textContent?.trim() || '';
+        const aria    = addrEl.getAttribute('aria-label') || '';
         const cleaned = (ioText || aria.replace(/^(?:Address|العنوان):\s*/i, '')).trim();
         if (cleaned && !isValidPhone(cleaned) && cleaned.length > 5) {
           item.address = cleaned;
+          log(`[ENRICH] Address found: ${item.address}`);
         }
       }
     }
 
-    // 6. Rating from panel
-    if (item.rating === null) {
-      const ratingEl = panel.querySelector('span.ceNzKf, div.F7nice span[aria-hidden="true"]');
+    // 6. Rating — scoped to narrow pane only
+    if (item.rating === null || item.rating === undefined) {
+      const ratingEl = pane.querySelector(
+        'span.ceNzKf, div.F7nice span[aria-hidden="true"],' +
+        'span[aria-label*="stars" i], span[aria-label*="نجوم" i]'
+      );
       if (ratingEl) {
-        const val = parseFloat(ratingEl.textContent?.trim());
-        if (!isNaN(val) && val >= 1 && val <= 5) item.rating = val;
+        const txt = ratingEl.getAttribute('aria-label') || ratingEl.textContent || '';
+        const m   = txt.match(/(\d+(?:[.,]\d+)?)/);
+        if (m) {
+          const val = parseFloat(m[1].replace(',', '.'));
+          if (!isNaN(val) && val >= 1 && val <= 5) item.rating = val;
+        }
       }
     }
 
-    // 7. Canonical profile URL & Place ID
+    // 7. Canonical profile URL & Place ID from narrow pane or current URL
     if (!item.profileUrl || !item.placeId) {
-      const canonUrl = extractPanelProfileUrl(panel) || profileUrl;
+      const canonUrl = extractPanelProfileUrl(pane) || profileUrl;
       if (canonUrl) {
-        item.profileUrl = normalizeGoogleMapsUrl(canonUrl);
+        item.profileUrl       = normalizeGoogleMapsUrl(canonUrl);
         item.googleProfileUrl = item.profileUrl;
         if (!item.placeId) item.placeId = extractPlaceId(item.profileUrl);
-        if (!item.cid) item.cid = extractCid(item.profileUrl);
+        if (!item.cid)     item.cid     = extractCid(item.profileUrl);
       }
     }
   }
 
-  function extractPanelName(panel) {
-    const root = panel || document;
+  function extractPanelName(pane) {
+    // Only look for these inside the narrow pane element passed in.
+    // NO bare 'h1' fallback — that would match any h1 in the document
+    // and fire before the correct business panel loads.
+    const root = pane || document;
     const selectors = [
       'h1.DUwDvf',
       'h1.fontHeadlineLarge',
       'h1[class*="DUwDvf"]',
-      'div[role="main"] h1',
-      'h1',
+      // div.TIHn2 is the title container in the detail pane
+      'div.TIHn2 h1',
+      'div.lMbq3e h1',
     ];
 
     for (const sel of selectors) {
@@ -879,9 +970,7 @@
       if (el) {
         let txt = el.textContent || '';
         txt = txt.replace(/[\u200E\u200F\u202A-\u202E\uFEFF\u00A0]/g, ' ').replace(/\s+/g, ' ').trim();
-        if (txt && !isGenericHeader(txt)) {
-          return txt;
-        }
+        if (txt && !isGenericHeader(txt)) return txt;
       }
     }
     return '';
