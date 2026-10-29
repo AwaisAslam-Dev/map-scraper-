@@ -12,7 +12,9 @@
   ],
 
   "host_permissions": [
-    "https://www.google.com/maps/*"
+    "https://www.google.com/maps/*",
+    "http://*/*",
+    "https://*/*"
   ],
 
   "action": {
@@ -31,7 +33,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.google.com/maps/*"],
-      "js": ["content.js"],
+      "js": ["utils.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
