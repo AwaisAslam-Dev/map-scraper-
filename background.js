@@ -29,8 +29,13 @@ const {
   mergeBusinessRecords,
   deduplicateAndMergeDataset,
   isExternalLink,
+  cleanExternalUrl,
   isLinktreeOrBioLink,
   extractContactFromHtml,
+  validateBusinessRecord,
+  extractPhoneNumber,
+  extractBusinessWebsite,
+  extractBusinessSocialLinks,
 } = self.MapsScraperUtils || {};
 
 const KEY_RESULTS   = 'scrape_results';
@@ -89,14 +94,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
         }
       });
-      updateState({ isRunning: false });
-      sendResponse({ ok: true });
+      updateState({ isRunning: false, status: 'stopped' }).then(() => sendResponse({ ok: true }));
       return true;
     }
 
     case 'SCRAPE_DONE': {
-      updateState({ isRunning: false });
-      sendResponse({ ok: true });
+      updateState({ isRunning: false, status: 'completed' }).then(() => sendResponse({ ok: true }));
       return true;
     }
 
@@ -131,13 +134,16 @@ async function startScrapeOnTab() {
     }
   }
 
+  // Set running state BEFORE sending message to prevent race conditions with fast completion
+  await updateState({ isRunning: true, status: 'running' });
+
   try {
     await chrome.tabs.sendMessage(tabId, { type: 'START_SCRAPE' });
   } catch (err) {
+    await updateState({ isRunning: false, status: 'error' });
     return { ok: false, error: 'Failed to start: ' + err.message };
   }
 
-  await updateState({ isRunning: true });
   return { ok: true };
 }
 
@@ -186,20 +192,23 @@ async function doSaveBatch(items) {
   for (const rawItem of items) {
     if (!rawItem || (!rawItem.name && !rawItem.profileUrl)) continue;
 
-    const normUrl = (normalizeGoogleMapsUrl ? normalizeGoogleMapsUrl(rawItem.profileUrl) : rawItem.profileUrl) || null;
-    const placeId = (extractPlaceId ? extractPlaceId(normUrl || rawItem.profileUrl) : null) || rawItem.placeId || null;
-    const cid     = (extractCid ? extractCid(normUrl || rawItem.profileUrl) : null) || rawItem.cid || null;
-
-    const item = {
-      name:       (rawItem.name || '').trim(),
-      phone:      (formatPhone ? formatPhone(rawItem.phone || rawItem.rawPhone) : (rawItem.phone || '')).trim(),
-      rawPhone:   (rawItem.rawPhone || rawItem.phone || '').trim(),
-      link:       (rawItem.link || '').trim() || null,
-      profileUrl: normUrl,
-      address:    (rawItem.address || '').trim() || null,
-      placeId:    placeId,
-      cid:        cid,
+    // Validate item through data validation layer
+    const item = validateBusinessRecord ? validateBusinessRecord(rawItem) : {
+      name:             (rawItem.name || '').trim(),
+      phone:            (formatPhone ? formatPhone(rawItem.phone || rawItem.rawPhone) : (rawItem.phone || '')).trim(),
+      rawPhone:         (rawItem.rawPhone || rawItem.phone || '').trim(),
+      website:          (cleanExternalUrl ? cleanExternalUrl(rawItem.website || rawItem.link) : (rawItem.website || rawItem.link || '').trim()) || '',
+      link:             (cleanExternalUrl ? cleanExternalUrl(rawItem.link || rawItem.website) : (rawItem.link || rawItem.website || '').trim()) || null,
+      socialLinks:      Array.isArray(rawItem.socialLinks) ? rawItem.socialLinks : [],
+      profileUrl:       (normalizeGoogleMapsUrl ? normalizeGoogleMapsUrl(rawItem.profileUrl) : rawItem.profileUrl) || null,
+      googleProfileUrl: (normalizeGoogleMapsUrl ? normalizeGoogleMapsUrl(rawItem.profileUrl) : rawItem.profileUrl) || '',
+      address:          (rawItem.address || '').trim() || null,
+      rating:           rawItem.rating !== undefined ? rawItem.rating : null,
+      placeId:          rawItem.placeId || (extractPlaceId ? extractPlaceId(rawItem.profileUrl) : null) || null,
+      cid:              rawItem.cid || (extractCid ? extractCid(rawItem.profileUrl) : null) || null,
     };
+
+    if (!item || (!item.name && !item.profileUrl)) continue;
 
     const uniqueKey = getBusinessUniqueKey ? getBusinessUniqueKey(item) : (item.profileUrl || item.name);
 
@@ -217,18 +226,19 @@ async function doSaveBatch(items) {
       console.log(`[DEDUP] Duplicate business detected: ${uniqueKey || item.name}`);
       const existing = results[matchedIdx];
       const prevPhone = existing.phone;
-      const prevLink = existing.link;
+      const prevLink = existing.website || existing.link;
       const prevUrl = existing.profileUrl;
 
       if (mergeBusinessRecords) {
         mergeBusinessRecords(existing, item);
       } else {
         if (!existing.phone && item.phone) existing.phone = item.phone;
+        if (!existing.website && item.website) existing.website = item.website;
         if (!existing.link && item.link) existing.link = item.link;
         if (!existing.profileUrl && item.profileUrl) existing.profileUrl = item.profileUrl;
       }
 
-      const wasEnriched = (existing.phone !== prevPhone) || (existing.link !== prevLink) || (existing.profileUrl !== prevUrl);
+      const wasEnriched = (existing.phone !== prevPhone) || ((existing.website || existing.link) !== prevLink) || (existing.profileUrl !== prevUrl);
       if (wasEnriched) {
         enriched++;
         console.log(`[DEDUP] Merging newly discovered fields into ${existing.name}`);
@@ -382,7 +392,7 @@ async function fetchExternalContact(targetUrl, businessName = '') {
             }
           }
         } catch (subErr) {
-          console.warn(`[MapsLead] Contact subpage fetch failed: ${subErr.message}`);
+          console.log(`[MapsLead] Contact subpage fetch failed: ${subErr.message}`);
         }
       }
     }
@@ -393,7 +403,7 @@ async function fetchExternalContact(targetUrl, businessName = '') {
 
   } catch (err) {
     const errorMsg = err.name === 'AbortError' ? 'Request timed out (4s)' : err.message;
-    console.warn(`[MapsLead] External fetch error for ${cleanTarget}: ${errorMsg}`);
+    console.log(`[MapsLead] External fetch note for ${cleanTarget}: ${errorMsg}`);
     const errRes = { ok: false, error: errorMsg, phone: null, status: 'fetch_failed' };
     externalFetchCache.set(cleanTarget, errRes);
     return errRes;
@@ -403,11 +413,12 @@ async function fetchExternalContact(targetUrl, businessName = '') {
 // ── getStats ──────────────────────────────────────────────────────────────────
 async function getStats() {
   const data  = await chrome.storage.local.get([KEY_RESULTS, KEY_STATE]);
-  const state = data[KEY_STATE] || { isRunning: false, total: 0, batchCount: 0 };
+  const state = data[KEY_STATE] || { isRunning: false, total: 0, batchCount: 0, status: 'idle' };
   return {
     total:      (data[KEY_RESULTS] || []).length,
     isRunning:  state.isRunning  || false,
     batchCount: state.batchCount || 0,
+    status:     state.status     || (state.isRunning ? 'running' : 'idle'),
   };
 }
 
@@ -438,17 +449,20 @@ async function buildCSV(onlyNoWebsite = false) {
   const filterActive = onlyNoWebsite !== undefined ? onlyNoWebsite : !!data['onlyNoWebsite'];
   let exportList = dedupedResults;
   if (filterActive) {
-    exportList = exportList.filter(r => !r.link || r.link.trim() === '');
+    exportList = exportList.filter(r => (!r.website || r.website.trim() === '') && (!r.link || r.link.trim() === ''));
   }
 
   if (exportList.length === 0) return { csv: '', count: 0 };
 
-  const header = 'Business Name,Phone,Website,Google Profile URL';
+  const header = 'Business Name,Phone,Website,Google Profile URL,Address,Rating,Social Links';
   const rows   = exportList.map(r => [
-    csvEscape(r.name),
+    csvEscape(r.name || r.businessName),
     csvEscape(r.phone),
-    csvEscape(r.link),
-    csvEscape(r.profileUrl),
+    csvEscape(r.website || r.link),
+    csvEscape(r.googleProfileUrl || r.profileUrl),
+    csvEscape(r.address),
+    csvEscape(r.rating !== null && r.rating !== undefined ? r.rating : ''),
+    csvEscape(Array.isArray(r.socialLinks) && r.socialLinks.length > 0 ? r.socialLinks.join(' | ') : ''),
   ].join(','));
 
   return { csv: [header, ...rows].join('\n'), count: exportList.length };
