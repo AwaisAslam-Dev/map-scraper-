@@ -32,7 +32,16 @@ const {
   deduplicateAndMergeDataset,
   isLinktreeOrBioLink,
   isExternalLink,
+  cleanExternalUrl,
   extractContactFromHtml,
+  isCloseBusinessName,
+  convertArabicIndicDigits,
+  extractBusinessPhoneNumber,
+  extractBusinessLinks,
+  extractPhoneNumber,
+  extractBusinessWebsite,
+  extractBusinessSocialLinks,
+  validateBusinessRecord,
 } = utils;
 
 console.log('====================================================');
@@ -413,6 +422,465 @@ async function main() {
     const rel = '/maps/place/Dubai+Mall/@25.1972,55.2744,15z/data=!1s0x3e5f43:0x123';
     const norm = normalizeGoogleMapsUrl(rel);
     assert.strictEqual(norm, 'https://www.google.com/maps/place/Dubai+Mall/@25.197,55.274/data=!1s0x3e5f43:0x123');
+  });
+
+  // User Exact Screenshot Regression: Stale Detail Panel Deduplication
+  runTest('User Regression: AD Salon & Spa (5 duplicate rows) & Beauty and Rose (6 duplicate rows)', () => {
+    const userContaminatedRows = [
+      { name: 'AD Salon & Spa', phone: '+966538811708', link: '', profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.8,46.5/data=!1s0x101:0x101' },
+      { name: 'AD Salon & Spa', phone: '+966538811708', link: '', profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.8,46.5/data=!1s0x102:0x102' },
+      { name: 'AD Salon & Spa', phone: '+966538811708', link: '', profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.8,46.5/data=!1s0x103:0x103' },
+      { name: 'AD Salon & Spa', phone: '+966538811708', link: '', profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.8,46.5/data=!1s0x104:0x104' },
+      { name: 'AD Salon & Spa', phone: '+966538811708', link: '', profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.8,46.5/data=!1s0x105:0x105' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x201:0x201' },
+      { name: 'يونيك صالون و سبا', phone: '', link: '', profileUrl: 'https://www.google.com/maps/place/Unique/@24.8,46.5/data=!1s0x301:0x301' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x202:0x202' },
+      { name: 'BELLEZZA LOUNGE', phone: '', link: '', profileUrl: 'https://www.google.com/maps/place/Bellezza/@24.8,46.5/data=!1s0x401:0x401' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x203:0x203' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x204:0x204' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x205:0x205' },
+      { name: 'Beauty and Rose', phone: '+966580396652', link: 'https://instagram.com/beauty_rose', profileUrl: 'https://www.google.com/maps/place/Beauty/@24.8,46.5/data=!1s0x206:0x206' },
+    ];
+
+    const cleaned = deduplicateAndMergeDataset(userContaminatedRows);
+    assert.strictEqual(cleaned.length, 4, '13 contaminated rows must resolve to exactly 4 unique businesses');
+
+    const adSalon = cleaned.find(b => b.name === 'AD Salon & Spa');
+    assert.ok(adSalon, 'AD Salon & Spa must exist');
+    assert.strictEqual(normalizePhone(adSalon.phone), '+966538811708');
+
+    const beautyRose = cleaned.find(b => b.name === 'Beauty and Rose');
+    assert.ok(beautyRose, 'Beauty and Rose must exist');
+    assert.strictEqual(normalizePhone(beautyRose.phone), '+966580396652');
+    assert.strictEqual(beautyRose.link, 'https://instagram.com/beauty_rose');
+
+    const uniqueSalon = cleaned.find(b => b.name === 'يونيك صالون و سبا');
+    assert.ok(uniqueSalon, 'يونيك صالون و سبا must exist');
+
+    const bellezza = cleaned.find(b => b.name === 'BELLEZZA LOUNGE');
+    assert.ok(bellezza, 'BELLEZZA LOUNGE must exist');
+  });
+
+  // Business Name Distinctiveness Test
+  runTest('isCloseBusinessName: Accurately differentiates distinct salons while handling truncations', () => {
+    // Distinct businesses must NOT match even if they share "salon" / "spa" / "beauty"
+    assert.strictEqual(isCloseBusinessName('AD Salon & Spa', 'Beauty and Rose'), false, 'AD Salon & Spa != Beauty and Rose');
+    assert.strictEqual(isCloseBusinessName('AD Salon & Spa', 'Al Maha Beauty Salon'), false, 'AD Salon & Spa != Al Maha Beauty Salon');
+    assert.strictEqual(isCloseBusinessName('Beauty and Rose', 'BELLEZZA LOUNGE'), false, 'Beauty and Rose != BELLEZZA LOUNGE');
+
+    // Truncated / bilingual variations of the same business must match
+    assert.strictEqual(isCloseBusinessName('Arum Beauty Sa...', 'Arum Beauty Salon'), true, 'Arum Beauty Sa... == Arum Beauty Salon');
+    assert.strictEqual(isCloseBusinessName('Beauty and Rose', 'Beauty and Rose / بيوتي اند روز'), true, 'English == Bilingual name');
+
+    // Arabic business name with district/neighborhood appended in feed card
+    assert.strictEqual(
+      isCloseBusinessName('صالون كلمات الجمال النسائي حي حطين', 'صالون كلمات الجمال النسائي'),
+      true,
+      'Arabic name with district preposition (حي حطين) matches base business name'
+    );
+  });
+
+  // External URL & Google Redirect Unwrapping Test
+  runTest('URL Unwrapping: Unwraps Google redirect URLs for Instagram, Snapchat, websites', () => {
+    const wrappedInstagram = 'https://www.google.com/url?q=https%3A%2F%2Fwww.instagram.com%2Fbeauty_rose%2F&sa=D&sntz=1&usg=AOvVaw2...';
+    assert.strictEqual(cleanExternalUrl(wrappedInstagram), 'https://www.instagram.com/beauty_rose/');
+    assert.strictEqual(isExternalLink(wrappedInstagram), true);
+
+    const wrappedSnapchat = 'https://www.google.com/url?q=https%3A%2F%2Fwww.snapchat.com%2Fadd%2Fad_salon&sa=D';
+    assert.strictEqual(cleanExternalUrl(wrappedSnapchat), 'https://www.snapchat.com/add/ad_salon');
+
+    const bareDomain = 'beauty-center.sa';
+    assert.strictEqual(cleanExternalUrl(bareDomain), 'https://beauty-center.sa');
+
+    const googleInternal = 'https://www.google.com/maps/place/SomePlace/@24.8,46.5';
+    assert.strictEqual(cleanExternalUrl(googleInternal), null);
+    assert.strictEqual(isExternalLink(googleInternal), false);
+  });
+
+  // Arabic-Indic Digits & Saudi Phone Canonicalization Test
+  runTest('Arabic-Indic Digits & Saudi Phone Canonicalization', () => {
+    const arabicIndic = '٠٥٣٨٨١١٧٠٨';
+    assert.strictEqual(convertArabicIndicDigits(arabicIndic), '0538811708');
+    assert.strictEqual(normalizePhone(arabicIndic), '+966538811708');
+
+    const persian = '۰۵۳۸۸۱۱۷۰۸';
+    assert.strictEqual(convertArabicIndicDigits(persian), '0538811708');
+    assert.strictEqual(normalizePhone(persian), '+966538811708');
+
+    const saudiLocal = '0538811708';
+    assert.strictEqual(normalizePhone(saudiLocal), '+966538811708');
+
+    const saudiIntl = '+966538811708';
+    assert.strictEqual(normalizePhone(saudiIntl), '+966538811708');
+
+    const saudiLandline = '0112345678';
+    assert.strictEqual(normalizePhone(saudiLandline), '+966112345678');
+  });
+
+  // Container DOM Phone and Links Extractor Test
+  runTest('extractBusinessPhoneNumber & extractBusinessLinks: Mock DOM Containers', () => {
+    // Mock container with aria-label in Arabic
+    const mockContainer = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('aria-label*="هاتف"') || sel.includes('aria-label*="الهاتف"')) {
+          return [{
+            getAttribute: (attr) => attr === 'aria-label' ? 'الهاتف: ٠٥٣٨٨١١٧٠٨' : null,
+            textContent: '٠٥٣٨٨١١٧٠٨'
+          }];
+        }
+        if (sel.includes('data-item-id="authority"')) {
+          return [{
+            getAttribute: (attr) => attr === 'data-url' ? 'https://www.google.com/url?q=https%3A%2F%2Fwww.ad-salon.sa%2F' : null,
+            href: 'https://www.google.com/url?q=https%3A%2F%2Fwww.ad-salon.sa%2F'
+          }];
+        }
+        if (sel.includes('instagram.com')) {
+          return [{
+            getAttribute: (attr) => null,
+            href: 'https://www.instagram.com/ad_salon_spa/'
+          }];
+        }
+        return [];
+      }
+    };
+
+    const phoneRes = extractBusinessPhoneNumber(mockContainer);
+    assert.ok(phoneRes, 'Phone must be extracted from Arabic aria-label with Arabic-Indic digits');
+    assert.strictEqual(phoneRes.normPhone, '+966538811708');
+
+    const linksRes = extractBusinessLinks(mockContainer);
+    assert.ok(linksRes, 'Links must be extracted');
+    assert.strictEqual(linksRes.website, 'https://www.ad-salon.sa');
+    assert.strictEqual(linksRes.socialLinks.length, 1);
+    assert.strictEqual(linksRes.socialLinks[0], 'https://www.instagram.com/ad_salon_spa/');
+  });
+
+  // Strict Phone Extraction: Card with listing text must NEVER populate phone field
+  runTest('Strict Phone Extraction: Card with listing text, rating, address, hours -> Empty Phone', () => {
+    // Exact representative mock of user's reproduced bug
+    const mockCard = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('div.W4Efsd > span') || sel.includes('div.UsdlK')) {
+          return [
+            { children: [], textContent: 'Spa' },
+            { children: [], textContent: '8260 سعيد بن زيد، الدرعية الجديدة، الدرعية' },
+            { children: [], textContent: 'Open · Closes 10 PM' },
+          ];
+        }
+        return [];
+      }
+    };
+
+    const ph = extractPhoneNumber(mockCard);
+    assert.strictEqual(ph.phone, '', 'Phone must be empty when card only has category, address, hours');
+    assert.strictEqual(ph.normPhone, '');
+
+    // Even if entire listing text is checked, normalizePhone must reject it
+    const contaminatedText = 'And Spa Beauty Salon4.1(815)Spa · 8260 سعيد بن زيد، الدرعية الجديدة، الدرعيةOpen · Closes 10 PM';
+    assert.strictEqual(normalizePhone(contaminatedText), '', 'Contaminated listing text must return empty phone');
+    assert.strictEqual(formatPhone(contaminatedText), '', 'formatPhone on listing text must return empty');
+  });
+
+  // Strict Phone Extraction: Card with valid phone number in leaf span
+  runTest('Strict Phone Extraction: Card with valid phone number in leaf span', () => {
+    const mockCard = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('div.W4Efsd > span') || sel.includes('div.UsdlK')) {
+          return [
+            { children: [], textContent: 'Beauty salon' },
+            { children: [], textContent: '055 123 4567' },
+            { children: [], textContent: 'Open · Closes 10 PM' },
+          ];
+        }
+        return [];
+      }
+    };
+
+    const ph = extractPhoneNumber(mockCard);
+    assert.strictEqual(ph.normPhone, '+966551234567', 'Valid phone span must be recognized and normalized');
+    assert.strictEqual(ph.phone, '+966 55 123 4567');
+  });
+
+  // Strict Website Extraction: Isolates official website from social media links
+  runTest('Strict Website Extraction: Isolates official website from social media links', () => {
+    const mockPanelOnlyInstagram = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('instagram.com')) {
+          return [{
+            getAttribute: () => null,
+            href: 'https://instagram.com/beauty_salon'
+          }];
+        }
+        return [];
+      }
+    };
+
+    const web = extractBusinessWebsite(mockPanelOnlyInstagram);
+    assert.strictEqual(web, '', 'Official website must be empty when only Instagram exists');
+
+    const social = extractBusinessSocialLinks(mockPanelOnlyInstagram);
+    assert.strictEqual(social.length, 1);
+    assert.strictEqual(social[0], 'https://instagram.com/beauty_salon');
+
+    const mockPanelWithOfficialSite = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('data-item-id="authority"')) {
+          return [{
+            getAttribute: () => 'https://www.google.com/url?q=https%3A%2F%2Fwww.baseandboon.com%2F',
+            href: 'https://www.google.com/url?q=https%3A%2F%2Fwww.baseandboon.com%2F'
+          }];
+        }
+        return [];
+      }
+    };
+
+    const officialWeb = extractBusinessWebsite(mockPanelWithOfficialSite);
+    assert.strictEqual(officialWeb, 'https://www.baseandboon.com', 'Official website must be extracted');
+  });
+
+  // Google Maps profile URL must NEVER be treated as official website
+  runTest('URL Separation: Google Maps profile URLs are never treated as official websites', () => {
+    const mapsUrl = 'https://www.google.com/maps/place/Base+%26+Boon/@24.8,46.5/data=!1s0x1:0x1';
+    assert.strictEqual(cleanExternalUrl(mapsUrl), null, 'Maps place URL must be rejected as external link');
+    assert.strictEqual(isExternalLink(mapsUrl), false);
+  });
+
+  // Data Validation Layer: Sanitizes contaminated records
+  runTest('Data Validation Layer: Sanitizes contaminated records without losing business name or address', () => {
+    const badRecord = {
+      name: 'And Spa Beauty Salon',
+      phone: 'And Spa Beauty Salon4.1(815)Spa · 8260 سعيد بن زيد، الدرعية الجديدة، الدرعيةOpen · Closes 10 PM',
+      link: 'https://www.google.com/maps/place/And+Spa/@24.8,46.5',
+      address: '8260 سعيد بن زيد، الدرعية الجديدة، الدرعية',
+      rating: '4.1',
+      profileUrl: 'https://www.google.com/maps/place/And+Spa/@24.8,46.5/data=!1s0x123:0x456'
+    };
+
+    const validated = validateBusinessRecord(badRecord);
+    assert.strictEqual(validated.name, 'And Spa Beauty Salon');
+    assert.strictEqual(validated.phone, '', 'Contaminated phone must be reset to empty string');
+    assert.strictEqual(validated.website, '', 'Internal Google Maps URL in link must be reset to empty website');
+    assert.strictEqual(validated.address, '8260 سعيد بن زيد، الدرعية الجديدة، الدرعية');
+    assert.strictEqual(validated.rating, 4.1);
+    assert.ok(validated.googleProfileUrl.includes('0x123:0x456'));
+  });
+
+  // Final CSV Export column order and header
+  runTest('CSV Export: Strict column order, expected headers, and clean values', () => {
+    const sampleRecord = {
+      name: 'Base & Boon - Diriyah',
+      phone: '+966 55 123 4567',
+      website: 'https://baseandboon.com',
+      googleProfileUrl: 'https://www.google.com/maps/place/Base+Boon/@24.8,46.5/data=!1s0x9:0x9',
+      address: 'Abdulaziz Ibn Mohammad Ibn Saud Rd',
+      rating: 4.1,
+      socialLinks: ['https://instagram.com/baseandboon']
+    };
+
+    const deduped = deduplicateAndMergeDataset([sampleRecord]);
+    assert.strictEqual(deduped.length, 1);
+
+    const r = deduped[0];
+    assert.strictEqual(r.name, 'Base & Boon - Diriyah');
+    assert.strictEqual(r.phone, '+966 55 123 4567');
+    assert.strictEqual(r.website, 'https://baseandboon.com');
+    assert.strictEqual(r.address, 'Abdulaziz Ibn Mohammad Ibn Saud Rd');
+    assert.strictEqual(r.rating, 4.1);
+  });
+
+  // End-to-end Detail Panel Contact Extraction & Enrichment Pipeline
+  runTest('Detail Panel Pipeline: Enriches empty card record with Phone, Website, and Social Links', () => {
+    // Stage 1: Bare feed card record (only Name, Rating, and Maps Profile URL available on search card)
+    const initialFeedItem = {
+      name: 'AD Salon & Spa',
+      businessName: 'AD Salon & Spa',
+      phone: '',
+      rawPhone: '',
+      website: '',
+      link: null,
+      socialLinks: [],
+      profileUrl: 'https://www.google.com/maps/place/AD+Salon+Spa/@24.71,46.67/data=!4m2!3m1!1s0x3e2f03890d:0xabcdef',
+      googleProfileUrl: 'https://www.google.com/maps/place/AD+Salon+Spa/@24.71,46.67/data=!4m2!3m1!1s0x3e2f03890d:0xabcdef',
+      address: null,
+      rating: 4.8,
+      placeId: 'ChIJ7e2f03890d',
+      cid: '0xabcdef'
+    };
+
+    // Stage 2: Mock Google Maps in-page detail panel container with live localized DOM
+    const mockDetailPanel = {
+      querySelectorAll: (sel) => {
+        // Dedicated phone buttons with Arabic aria-label and Saudi phone format
+        if (sel.includes('button[data-item-id^="phone:tel:"]') || sel.includes('[data-item-id*="phone"] button') || sel.includes('button[aria-label*="الهاتف" i]')) {
+          return [{
+            getAttribute: (attr) => attr === 'data-item-id' ? 'phone:tel:0538811708' : (attr === 'aria-label' ? 'الهاتف: 053 881 1708' : null),
+            textContent: '053 881 1708'
+          }];
+        }
+        // Dedicated authority button with official website
+        if (sel.includes('a[data-item-id="authority"]') || sel.includes('a[aria-label*="الموقع الإلكتروني" i]')) {
+          return [{
+            href: 'https://www.ad-salon.sa',
+            getAttribute: (attr) => attr === 'href' ? 'https://www.ad-salon.sa' : null
+          }];
+        }
+        // Social media links
+        if (sel.includes('social') || sel.includes('instagram.com')) {
+          return [{
+            href: 'https://www.instagram.com/ad_salon_spa/',
+            getAttribute: (attr) => attr === 'href' ? 'https://www.instagram.com/ad_salon_spa/' : null
+          }];
+        }
+        return [];
+      },
+      querySelector: (sel) => {
+        if (sel.includes('button[data-item-id="address"]')) {
+          return {
+            getAttribute: () => 'العنوان: طريق الملك فهد، الرياض 12345',
+            querySelector: () => ({ textContent: 'طريق الملك فهد، الرياض 12345' })
+          };
+        }
+        if (sel.includes('h1.DUwDvf') || sel.includes('h1')) {
+          return { textContent: 'AD Salon & Spa' };
+        }
+        return null;
+      }
+    };
+
+    // Extract contact information from panel
+    const phoneRes = extractPhoneNumber(mockDetailPanel);
+    const webRes   = extractBusinessWebsite(mockDetailPanel);
+    const socRes   = extractBusinessSocialLinks(mockDetailPanel);
+
+    assert.strictEqual(phoneRes.phone, '+966 53 881 1708');
+    assert.strictEqual(webRes, 'https://www.ad-salon.sa');
+    assert.strictEqual(socRes.length, 1);
+    assert.strictEqual(socRes[0], 'https://www.instagram.com/ad_salon_spa/');
+
+    // Enrich the record in-place
+    const enrichedRecord = {
+      ...initialFeedItem,
+      phone: phoneRes.phone,
+      rawPhone: phoneRes.rawPhone,
+      website: webRes,
+      link: webRes,
+      socialLinks: socRes,
+      address: 'طريق الملك فهد، الرياض 12345'
+    };
+
+    const validated = validateBusinessRecord(enrichedRecord);
+    assert.strictEqual(validated.name, 'AD Salon & Spa');
+    assert.strictEqual(validated.phone, '+966 53 881 1708');
+    assert.strictEqual(validated.website, 'https://www.ad-salon.sa');
+    assert.strictEqual(validated.address, 'طريق الملك فهد، الرياض 12345');
+    assert.strictEqual(validated.socialLinks.length, 1);
+    assert.strictEqual(validated.rating, 4.8);
+  });
+
+  // Regression 27: Standalone Single Place Profile Extraction (AD Salon & Spa from user screenshot)
+  runTest('Single Profile Extraction: AD Salon & Spa extracts phone +966 53 881 1708, rating 4.8, address, and saves immediately', () => {
+    // Representative DOM fixture matching user's exact screenshot of AD Salon & Spa
+    const mockDocument = {
+      querySelectorAll: (sel) => {
+        if (sel.includes('phone') || sel.includes('tel')) {
+          return [{
+            getAttribute: (a) => a === 'data-item-id' ? 'phone:tel:0538811708' : (a === 'aria-label' ? 'الهاتف: 053 881 1708' : null),
+            textContent: '053 881 1708'
+          }];
+        }
+        if (sel.includes('authority') || sel.includes('website')) {
+          return []; // AD Salon & Spa has no official website
+        }
+        if (sel.includes('social') || sel.includes('instagram')) {
+          return [];
+        }
+        return [];
+      },
+      querySelector: (sel) => {
+        if (sel.includes('h1.DUwDvf') || sel.includes('h1')) {
+          return { textContent: 'AD Salon & Spa' };
+        }
+        if (sel.includes('span.ceNzKf') || sel.includes('stars') || sel.includes('F7nice')) {
+          return { getAttribute: () => '4.8 stars', textContent: '4.8' };
+        }
+        if (sel.includes('address')) {
+          return {
+            getAttribute: () => 'Address: Al Khalidiyah, Diriyah 13713, Saudi Arabia',
+            querySelector: () => ({ textContent: 'Al Khalidiyah, Diriyah 13713, Saudi Arabia' })
+          };
+        }
+        return null;
+      }
+    };
+
+    // Extract fields
+    const phoneRes = extractPhoneNumber(mockDocument);
+    const webRes   = extractBusinessWebsite(mockDocument);
+    const socRes   = extractBusinessSocialLinks(mockDocument);
+
+    assert.strictEqual(phoneRes.phone, '+966 53 881 1708', 'Phone must be extracted as formatted Saudi mobile');
+    assert.strictEqual(webRes, '', 'Website must be empty when none provided');
+    assert.strictEqual(socRes.length, 0);
+
+    const placeRecord = {
+      name: 'AD Salon & Spa',
+      businessName: 'AD Salon & Spa',
+      phone: phoneRes.phone,
+      rawPhone: phoneRes.rawPhone,
+      website: webRes,
+      link: null,
+      socialLinks: socRes,
+      address: 'Al Khalidiyah, Diriyah 13713, Saudi Arabia',
+      rating: 4.8,
+      profileUrl: 'https://www.google.com/maps/place/AD+Salon+%26+Spa/@24.7136,46.6753,15z',
+      googleProfileUrl: 'https://www.google.com/maps/place/AD+Salon+%26+Spa/@24.7136,46.6753,15z',
+      placeId: 'ChIJAD_SALON_DIRIYAH'
+    };
+
+    const validated = validateBusinessRecord(placeRecord);
+    assert.strictEqual(validated.name, 'AD Salon & Spa');
+    assert.strictEqual(validated.phone, '+966 53 881 1708');
+    assert.strictEqual(validated.address, 'Al Khalidiyah, Diriyah 13713, Saudi Arabia');
+    assert.strictEqual(validated.rating, 4.8);
+    assert.strictEqual(validated.website, '');
+  });
+
+  // Regression 28: State Machine & Bulk Progression Counter Simulation
+  await runAsyncTest('State Machine & Counter Progression: Counters advance from 0 to N without deadlocks', async () => {
+    const mockStorage = new MockChromeStorage();
+
+    // Initial state: 0 items
+    let stats = { total: 0, isRunning: true, batchCount: 0, status: 'running' };
+    await mockStorage.set({ scrape_state: stats, scrape_results: [] });
+
+    // Item 1 extracted (e.g. AD Salon & Spa)
+    const item1 = {
+      name: 'AD Salon & Spa',
+      phone: '+966 53 881 1708',
+      website: '',
+      profileUrl: 'https://www.google.com/maps/place/AD+Salon/@24.7,46.6/data=!1s0x1:0x1'
+    };
+    await simulateSaveBatch(mockStorage, [item1]);
+    let currentData = await mockStorage.get(['scrape_results']);
+    assert.strictEqual(currentData.scrape_results.length, 1, 'Total must advance to 1 after first item');
+
+    // Item 2 extracted (e.g. Base & Boon)
+    const item2 = {
+      name: 'Base & Boon - Diriyah',
+      phone: '+966 55 123 4567',
+      website: 'https://baseandboon.com',
+      profileUrl: 'https://www.google.com/maps/place/Base+Boon/@24.7,46.6/data=!1s0x2:0x2'
+    };
+    await simulateSaveBatch(mockStorage, [item2]);
+    currentData = await mockStorage.get(['scrape_results']);
+    assert.strictEqual(currentData.scrape_results.length, 2, 'Total must advance to 2 without getting stuck');
+
+    // Final CSV export verification
+    const csvRes = await simulateBuildCSV(mockStorage);
+    assert.strictEqual(csvRes.afterCount, 2);
+    assert.ok(csvRes.csv.includes('AD Salon & Spa'));
+    assert.ok(csvRes.csv.includes('+966 53 881 1708'));
+    assert.ok(csvRes.csv.includes('Base & Boon - Diriyah'));
   });
 
   console.log('\n====================================================');

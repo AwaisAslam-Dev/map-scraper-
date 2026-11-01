@@ -171,7 +171,13 @@ async function refreshStats() {
   btnDownload.disabled = stats.total === 0;
 
   // If background says scraping stopped (natural end), update UI
-  if (isRunning && !stats.isRunning) {
+  if (stats.isRunning) {
+    isRunning = true;
+    setRunningUI(true);
+    setStatus('running', 'Scraping in progress…');
+    infoBox.style.display = 'none';
+    progressWrap.style.display = 'block';
+  } else if (isRunning || stats.status === 'completed') {
     isRunning = false;
     setRunningUI(false);
     setStatus('done', `Done — ${stats.total} total records scraped.`);
